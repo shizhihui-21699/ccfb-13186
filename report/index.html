@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型污染检测报告</title>
+<script src="results.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; }
+  body { background: #0f1420; }
+</style>
+<script type="module">
+import { LitElement, html, css, nothing } from 'https://cdn.jsdelivr.net/npm/lit@3.2.1/+esm';
+
+const SEVERITY = {
+  high:   { label: '高危', color: '#ff5c6c' },
+  medium: { label: '中危', color: '#ffb020' },
+};
+const POLLUTION_TYPE = {
+  'global-prototype':     '全局原型污染',
+  'returned-object-proto': '返回对象原型注入',
+};
+
+class PpApp extends LitElement {
+  static properties = {
+    _libIndex: { state: true },
+    _open: { state: true },
+  };
+
+  static styles = css`
+    :host {
+      display: block;
+      min-height: 100vh;
+      background: #0f1420;
+      color: #dbe2f0;
+      font: 14px/1.6 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .meta { color: #7c88a3; font-size: 12px; margin-bottom: 24px; }
+    .meta code { color: #9fb4e0; }
+
+    .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+    .tab {
+      border: 1px solid #2a3550; background: #171e30; color: #aeb9d4;
+      padding: 6px 16px; border-radius: 999px; cursor: pointer; font-size: 13px;
+    }
+    .tab.active { background: #2b4a8b; border-color: #3d63b8; color: #fff; }
+    .tab .cnt { opacity: .75; margin-left: 6px; font-size: 12px; }
+
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .stat { background: #171e30; border: 1px solid #232c44; border-radius: 10px; padding: 14px 16px; }
+    .stat .num { font-size: 26px; font-weight: 700; }
+    .stat .lbl { color: #7c88a3; font-size: 12px; }
+    .stat.bad .num { color: #ff5c6c; }
+    .stat.ok .num { color: #3ddc97; }
+
+    .fn { background: #171e30; border: 1px solid #232c44; border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+    .fn-head {
+      display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+      cursor: pointer; user-select: none;
+    }
+    .fn-head:hover { background: #1c2540; }
+    .fn-name { font-family: ui-monospace, Menlo, monospace; font-weight: 600; color: #9fb4e0; }
+    .fn-params { color: #5f6b88; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    .spacer { flex: 1; }
+    .badge {
+      font-size: 11px; padding: 2px 10px; border-radius: 999px; white-space: nowrap;
+    }
+    .badge.ok { background: rgba(61,220,151,.12); color: #3ddc97; }
+    .badge.high { background: rgba(255,92,108,.14); color: #ff5c6c; }
+    .badge.medium { background: rgba(255,176,32,.14); color: #ffb020; }
+    .tested { color: #5f6b88; font-size: 11px; white-space: nowrap; }
+    .caret { color: #5f6b88; font-size: 11px; }
+
+    .fn-body { border-top: 1px solid #232c44; padding: 4px 16px 14px; }
+    .finding { border: 1px solid #2a3550; border-radius: 8px; padding: 12px 14px; margin-top: 12px; background: #141a2b; }
+    .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .tag { font-size: 11px; padding: 1px 8px; border-radius: 4px; background: #232c44; color: #aeb9d4; font-family: ui-monospace, Menlo, monospace; }
+    .repro {
+      background: #0b0f1a; border: 1px solid #232c44; border-radius: 6px;
+      padding: 10px 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+      color: #ffd479; overflow-x: auto; white-space: pre; margin: 8px 0;
+    }
+    .copy {
+      float: right; background: none; border: 1px solid #2a3550; color: #7c88a3;
+      border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+    }
+    .copy:hover { color: #dbe2f0; }
+    .fixes { margin: 8px 0 0; padding-left: 18px; color: #aeb9d4; font-size: 13px; }
+    .fixes li { margin: 3px 0; }
+    .clean-note { color: #3ddc97; padding: 4px 16px 14px; font-size: 13px; }
+
+    .empty {
+      background: #171e30; border: 1px dashed #2a3550; border-radius: 10px;
+      padding: 40px 24px; text-align: center; color: #7c88a3;
+    }
+    .empty pre {
+      text-align: left; display: inline-block; background: #0b0f1a; padding: 14px 18px;
+      border-radius: 8px; color: #9fb4e0; font-size: 13px;
+    }
+  `;
+
+  constructor() {
+    super();
+    this._libIndex = 0;
+    this._open = new Set();
+    this._data = window.__PP_RESULTS__ || null;
+  }
+
+  _toggle(name) {
+    const s = new Set(this._open);
+    s.has(name) ? s.delete(name) : s.add(name);
+    this._open = s;
+  }
+
+  async _copy(e, text) {
+    const btn = e.target;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = '已复制';
+    } catch {
+      btn.textContent = '复制失败';
+    }
+    setTimeout(() => (btn.textContent = '复制'), 1200);
+  }
+
+  _worstSeverity(lib) {
+    if (lib.functions.some((f) => f.findings.some((x) => x.severity === 'high'))) return 'high';
+    if (lib.functions.some((f) => f.findings.length)) return 'medium';
+    return null;
+  }
+
+  _renderFinding(x) {
+    const sev = SEVERITY[x.severity];
+    return html`
+      <div class="finding">
+        <div class="tags">
+          <span class="tag" style="color:${sev.color}">${sev.label}</span>
+          <span class="tag">${POLLUTION_TYPE[x.pollutionType] || x.pollutionType}</span>
+          <span class="tag">向量: ${x.vector}</span>
+          <span class="tag">策略: ${x.strategy === 'path' ? '路径注入' : '对象注入'}</span>
+        </div>
+        <div>
+          <button class="copy" @click=${(e) => this._copy(e, x.repro)}>复制</button>
+          <div class="repro">${x.repro}</div>
+        </div>
+        <ul class="fixes">
+          ${x.fixes.map((f) => html`<li>${f}</li>`)}
+        </ul>
+      </div>`;
+  }
+
+  _renderFn(lib, f) {
+    const key = `${lib.label}:${f.name}`;
+    const open = this._open.has(key);
+    const worst = f.findings.some((x) => x.severity === 'high') ? 'high'
+      : f.findings.length ? 'medium' : null;
+    return html`
+      <div class="fn">
+        <div class="fn-head" @click=${() => this._toggle(key)}>
+          <span class="fn-name">${f.name}</span>
+          <span class="fn-params">(${f.params.join(', ')})</span>
+          <span class="spacer"></span>
+          <span class="tested">${f.tested} 用例</span>
+          ${worst
+            ? html`<span class="badge ${worst}">${f.findings.length} 项发现</span>`
+            : html`<span class="badge ok">未发现污染</span>`}
+          <span class="caret">${open ? '▲' : '▼'}</span>
+        </div>
+        ${open
+          ? html`<div class="fn-body">
+              ${f.findings.length
+                ? f.findings.map((x) => this._renderFinding(x))
+                : html`<div class="clean-note">全部 ${f.tested} 个攻击用例均未造成原型污染。</div>`}
+            </div>`
+          : nothing}
+      </div>`;
+  }
+
+  render() {
+    if (!this._data) {
+      return html`<div class="wrap"><div class="empty">
+        <p>未找到检测结果,请先运行检测器生成 <code>results.js</code>:</p>
+        <pre>node detector/detect.js \\
+  vulnerable=lib/object-utils.vulnerable.js \\
+  safe=lib/object-utils.safe.js</pre>
+      </div></div>`;
+    }
+
+    const d = this._data;
+    const lib = d.libs[this._libIndex];
+    const totalFindings = lib.functions.reduce((n, f) => n + f.findings.length, 0);
+    const vulnFns = lib.functions.filter((f) => f.findings.length).length;
+    const worst = this._worstSeverity(lib);
+
+    return html`
+      <div class="wrap">
+        <h1>原型污染检测报告</h1>
+        <div class="meta">
+          生成于 ${new Date(d.generatedAt).toLocaleString()} · Node ${d.node} ·
+          标记键 <code>${d.marker}</code> · 每个用例均在独立 vm realm 中执行
+        </div>
+
+        <div class="tabs">
+          ${d.libs.map((l, i) => {
+            const n = l.functions.reduce((c, f) => c + f.findings.length, 0);
+            return html`<button class="tab ${i === this._libIndex ? 'active' : ''}"
+              @click=${() => (this._libIndex = i)}>
+              ${l.label}<span class="cnt">${n} 发现</span>
+            </button>`;
+          })}
+        </div>
+
+        <div class="stats">
+          <div class="stat"><div class="num">${lib.functions.length}</div><div class="lbl">导出函数</div></div>
+          <div class="stat ${vulnFns ? 'bad' : 'ok'}"><div class="num">${vulnFns}</div><div class="lbl">存在风险的函数</div></div>
+          <div class="stat ${totalFindings ? 'bad' : 'ok'}"><div class="num">${totalFindings}</div><div class="lbl">发现总数</div></div>
+          <div class="stat ${worst ? 'bad' : 'ok'}">
+            <div class="num">${worst ? SEVERITY[worst].label : '无'}</div><div class="lbl">最高严重度</div>
+          </div>
+        </div>
+
+        <div class="meta" style="margin-bottom:12px">被测文件: <code>${lib.file}</code></div>
+        ${lib.functions.map((f) => this._renderFn(lib, f))}
+      </div>`;
+  }
+}
+
+customElements.define('pp-app', PpApp);
+</script>
+</head>
+<body>
+  <pp-app></pp-app>
+</body>
+</html>
